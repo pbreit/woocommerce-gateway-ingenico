@@ -44,6 +44,7 @@ class WC_Gateway_Ingenico_Request
         $this->gateway = $gateway;
         $this->notify_url = WC()->api_request_url('ingenico_webhook');
         $this->endpoint = $this->gateway->get_option('api_url');
+        add_action( 'woocommerce_thankyou_ingenico', array( $this, 'check_response' ) );
     }
 
     /**
@@ -65,9 +66,13 @@ class WC_Gateway_Ingenico_Request
           'billingAddress' => $billingAddress,
           'merchantCustomerId' => $order->get_id()
         );
+        $references = array(
+          'merchantReference' => $order->get_id()
+        );
         $_order = array(
           'amountOfMoney' => $amountOfMoney,
-          'customer' => $customer
+          'customer' => $customer,
+          'references' => $references
         );
         $hostedCheckoutSpecificInput = array(
           'local' => 'en_GB',
@@ -77,18 +82,6 @@ class WC_Gateway_Ingenico_Request
           'order' => $_order,
           'hostedCheckoutSpecificInput' => $hostedCheckoutSpecificInput
         );
-
-/*
-  'reference_id'       => $order->get_order_key(),
-  'pay_method'         => 'card',
-  'email'              => $this->limit_length($order->get_billing_email()),
-  'description'        => 'Payment for order #' . $order->get_id(),
-  'amount'             => $order->get_total(),
-  'currency'           => get_woocommerce_currency(),
-  'return_success_url' => esc_url_raw(add_query_arg('utm_nooverride', '1', $this->gateway->get_return_url($order))),
-  'return_error_url'   => esc_url_raw($order->get_cancel_order_url_raw()),
-  'callback_url'       => $this->notify_url,
-*/
 
         $mask = array(
             'api_token' => '***',
@@ -109,15 +102,15 @@ class WC_Gateway_Ingenico_Request
         $dataToHash = "POST\n".$requestHeaders['Content-Type']."\n".$requestHeaders['Date']."\n".$path."\n";
 
         $requestHeaders['Authorization'] = 'GCS v1HMAC:'.
-          $this->gateway->get_option('api_token').':'.
-          base64_encode(
-              hash_hmac(
-                  'sha256',
-                  $dataToHash,
-                  $this->gateway->get_option('api_secret'),
-                  true
-              )
-          );
+            $this->gateway->get_option('api_token').':'.
+            base64_encode(
+                hash_hmac(
+                    'sha256',
+                    $dataToHash,
+                    $this->gateway->get_option('api_secret'),
+                    true
+                )
+            );
 
         $raw_response = wp_safe_remote_post(
             $this->endpoint . $path,
@@ -150,16 +143,35 @@ class WC_Gateway_Ingenico_Request
      */
     public function get_payment_details($order)
     {
+        WC_Gateway_Ingenico::log('Ingenico - get_payment_details() request parameters: '.
+            $order->get_order_number().': '.
+            wc_print_r(array_merge($request, array_intersect_key($mask, $request)), true));
+
+        $request = apply_filters('woocommerce_gateway_payment_url', $request, $order);
+
+        $path = '/v1/'.$this->gateway->get_option('merchant_id').'/payments?merchantReference='.$order->get_id();
+
+        $requestHeaders = array();
+        $requestHeaders['Date'] = gmdate('D, d M Y H:i:s \G\M\T', time());
+        $dataToHash = "GET\n\n".$requestHeaders['Date']."\n".$path."\n";
+        $requestHeaders['Authorization'] = 'GCS v1HMAC:'.
+            $this->gateway->get_option('api_token').':'.
+            base64_encode(
+                hash_hmac(
+                    'sha256',
+                    $dataToHash,
+                    $this->gateway->get_option('api_secret'),
+                    true
+                )
+            );
+
         $raw_response = wp_safe_remote_get(
-            $this->endpoint . '/charges/' . $order->get_order_key(),
+            $this->endpoint . $path,
             array(
                 'method'      => 'GET',
                 'timeout'     => 30,
                 'user-agent'  => 'WooCommerce/' . WC()->version,
-                'headers'     => array(
-                    'Content-Type'  => 'application/json;',
-                    'Authorization' => 'Bearer ' . $this->gateway->get_option('api_token')
-                ),
+                'headers'     => $requestHeaders,
                 'httpversion' => '1.1',
             )
         );
@@ -167,11 +179,8 @@ class WC_Gateway_Ingenico_Request
         WC_Gateway_Ingenico::log('Ingenico - get_payment_details() response: ' . wc_print_r($raw_response, true));
 
         if (isset($raw_response['body']) && ($response = json_decode($raw_response['body'], true))) {
-            if (isset($response['data'])) {
-                $data = $response['data'];
-                if (isset($data['charge'])) {
-                    return $data['charge'];
-                }
+            if (isset($response['payments'])) {
+                return $response['payments'][0]['id'];
             }
         }
 
@@ -187,28 +196,42 @@ class WC_Gateway_Ingenico_Request
     public function make_payment_refund($order, $amount)
     {
 
-        if ( ! ($details = $this->get_payment_details($order))) {
+        if ( ! ($payment_id = $this->get_payment_details($order))) {
             return null;
         }
 
-        $request = array(
-            'charge_id' => $details['id'],
-            'amount'    => $amount,
-        );
+        $data = array();
+        $data['amountOfMoney']['currencyCode'] = get_woocommerce_currency();
+        $data['amountOfMoney']['amount'] = $order->get_total() * 100;
 
-        WC_Gateway_Ingenico::log('Ingenico - make_payment_refund() request parameters: ' . $order->get_order_number() . ': ' . wc_print_r($request, true));
+        WC_Gateway_Ingenico::log('Ingenico - make_payment_refund() request parameters: '.
+            $order->get_order_number().': '.
+            wc_print_r(array_merge($request, array_intersect_key($mask, $request)), true));
 
-        $raw_response = wp_safe_remote_post(
-            $this->endpoint . '/refunds',
+        $request = apply_filters('woocommerce_gateway_payment_url', $request, $order);
+        $path = '/v1/'.$this->gateway->get_option('merchant_id').'/payments/'.$payment_id.'/refund';
+        $requestHeaders = array();
+        $requestHeaders['Content-Type'] = 'application/json;';
+        $requestHeaders['Date'] = gmdate('D, d M Y H:i:s \G\M\T', time());
+        $dataToHash = "POST\n".$requestHeaders['Content-Type']."\n".$requestHeaders['Date']."\n".$path."\n";
+        $requestHeaders['Authorization'] = 'GCS v1HMAC:'.
+            $this->gateway->get_option('api_token').':'.
+            base64_encode(
+                hash_hmac(
+                    'sha256',
+                    $dataToHash,
+                    $this->gateway->get_option('api_secret'),
+                    true
+                )
+            );
+
+        $raw_response = wp_safe_remote_get(
+            $this->endpoint . $path,
             array(
-                'method'      => 'POST',
-                'timeout'     => 300,
+                'method'      => 'GET',
+                'timeout'     => 30,
                 'user-agent'  => 'WooCommerce/' . WC()->version,
-                'headers'     => array(
-                    'Content-Type'  => 'application/json;',
-                    'Authorization' => 'Bearer ' . $this->gateway->get_option('api_token')
-                ),
-                'body' => json_encode($request),
+                'headers'     => $requestHeaders,
                 'httpversion' => '1.1',
             )
         );
@@ -216,18 +239,8 @@ class WC_Gateway_Ingenico_Request
         WC_Gateway_Ingenico::log('Ingenico - make_payment_refund() response: ' . wc_print_r($raw_response, true));
 
         if (isset($raw_response['body']) && ($response = json_decode($raw_response['body'], true))) {
-            if (isset($response['data'])) {
-                $data = $response['data'];
-                if (isset($data['charge'])) {
-                    $charge = $data['charge'];
-                    if (isset($charge['included'])) {
-                        foreach ($charge['included'] as $included) {
-                            if ($included['type'] === 'refund') {
-                                return $included['id'];
-                            }
-                        }
-                    }
-                }
+            if (isset($response['payments'][0]['id'])) {
+                return $response['payments'][0]['id'];
             }
         }
 
@@ -235,36 +248,78 @@ class WC_Gateway_Ingenico_Request
     }
 
     /**
-     * Limit length of an arg.
+     * Validate transaction status and authenticity
      *
-     * @param  string $string Argument to limit.
-     * @param  integer $limit Limit size in characters.
-     * @return string
+     * @param  string $transaction TX ID.
+     * @return bool|array False or result array if successful and valid.
      */
-    protected function limit_length($string, $limit = 127)
-    {
-        // As the output is to be used in http_build_query which applies URL encoding, the string needs to be
-        // cut as if it was URL-encoded, but returned non-encoded (it will be encoded by http_build_query later).
-        $url_encoded_str = rawurlencode($string);
+    protected function validate_transaction( $transaction ) {
 
-        if (strlen($url_encoded_str) > $limit) {
-            $string = rawurldecode(substr($url_encoded_str, 0, $limit - 3) . '...');
-        }
-        return $string;
+      WC_Gateway_Ingenico::log('Ingenico - validate_transaction() request parameters: '.
+          $order->get_order_number().': '.
+          wc_print_r(array_merge($request, array_intersect_key($mask, $request)), true));
+
+      $request = apply_filters('woocommerce_gateway_payment_url', $request, $order);
+
+      $path = '/v1/'.$this->gateway->get_option('merchant_id').'/hostedcheckouts/'.$transactionid;
+
+      $requestHeaders = array();
+      $requestHeaders['Date'] = gmdate('D, d M Y H:i:s \G\M\T', time());
+      $dataToHash = "GET\n\n".$requestHeaders['Date']."\n".$path."\n";
+      $requestHeaders['Authorization'] = 'GCS v1HMAC:'.
+          $this->gateway->get_option('api_token').':'.
+          base64_encode(
+              hash_hmac(
+                  'sha256',
+                  $dataToHash,
+                  $this->gateway->get_option('api_secret'),
+                  true
+              )
+          );
+
+      $res = wp_safe_remote_get(
+          $this->endpoint . $path,
+          array(
+              'method'      => 'GET',
+              'timeout'     => 30,
+              'user-agent'  => 'WooCommerce/' . WC()->version,
+              'headers'     => $requestHeaders,
+              'httpversion' => '1.1',
+          )
+      );
+
+      WC_Gateway_Ingenico::log('Ingenico - get_payment_details() response: ' . wc_print_r($res, true));
+
+      if ( is_wp_error( $res ) ) {
+          return false;
+      }
+
+      $body = wp_remote_retrieve_body( $res );
+      $json = json_decode( $body );
+      if (isset($response['status']) &&  $response['status']=='PAYMENT_CREATED') {
+        return true;
+      }
+
+      return null;
     }
 
-    protected function getAuthorizationHeaderValue($requestHeaders)
-    {
-        return
-            static::AUTHORIZATION_ID . ' ' . static::AUTHORIZATION_TYPE. ':'.
-            $this->communicatorConfiguration->getApiKeyId() .':'.
-            base64_encode(
-                hash_hmac(
-                    static::HASH_ALGORITHM,
-                    $this->getSignData($requestHeaders),
-                    $this->communicatorConfiguration->getApiSecret(),
-                    true
-                )
-            );
+    /**
+     * Check payment status
+     */
+    public function check_response() {
+      if ( empty( $_REQUEST['hostedCheckoutId'] )) {
+        return;
+      }
+      $transaction    = wc_clean( wp_unslash( $_REQUEST['hostedCheckoutId'] ) );
+      if ( ! $order || ! $order->needs_payment() ) {
+        return false;
+      }
+      $transaction_result = $this->validate_transaction( $transaction );
+      if ( $transaction_result ) {
+        WC_Gateway_Ingenico::log( 'check_response(): ' . wc_print_r( $status, true ) );
+        $this->payment_complete( $order, $transaction, __( 'Payment completed', 'woocommerce' ) );
+      } else {
+        WC_Gateway_Ingenico::log( 'Received invalid response from Ingenico' );
+      }
     }
 }
