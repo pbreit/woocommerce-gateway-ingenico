@@ -3,9 +3,7 @@
  * Settings for Ingenico Gateway.
  */
 
-if ( ! defined('ABSPATH')) {
-    exit;
-}
+defined( 'ABSPATH' ) or exit;
 
 return array(
     'enabled'     => array(
@@ -73,7 +71,7 @@ return array(
     ),
     'api_secret'   => array(
         'title'       => __('Ingenico API secret', 'woocommerce'),
-        'type'        => 'text',
+        'type'        => 'password',
         'description' => '',
         'default'     => '',
         'desc_tip'    => true,
