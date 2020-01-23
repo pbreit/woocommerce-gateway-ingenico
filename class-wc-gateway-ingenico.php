@@ -184,9 +184,9 @@ function woocommerce_ingenico() {
              $hosted_id = $order->get_transaction_id();
 
              include_once plugin_dir_path(__FILE__) . 'includes/class-wc-gateway-ingenico-request.php';
-             $request = new WC_Gateway_Ingenico_Request();
+             $request = new WC_Gateway_Ingenico_Request( $this );
 
-             if ( $status = $ingenico_request->validate_transaction( $hosted_id ) ) {
+             if ( $status = $request->validate_transaction( $hosted_id ) ) {
                  $order->payment_complete();
              } else {
                  WC_Gateway_Ingenico::log('Received invalid response from Ingenico');
